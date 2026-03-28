@@ -3,6 +3,7 @@ package printer
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"image"
 	_ "image/jpeg"
@@ -668,6 +669,9 @@ func (p *Printer) GetLastImagePrint() ([]byte, error) {
 // Camera is started/stopped on-demand
 // ============================================
 
+// DefaultCameraFrameTimeout is the default timeout for waiting for a camera frame.
+const DefaultCameraFrameTimeout = 10 * time.Second
+
 // StartCamera starts the camera stream (lazy loading).
 func (p *Printer) StartCamera() bool {
 	return p.CameraClient.Start()
@@ -684,28 +688,48 @@ func (p *Printer) CameraIsAlive() bool {
 }
 
 // GetCameraFrame gets the latest camera frame as base64 (auto-starts camera if needed).
+// Waits up to DefaultCameraFrameTimeout for a frame to become available.
 func (p *Printer) GetCameraFrame() (string, error) {
 	// Auto-start camera if not running
 	if !p.CameraIsAlive() {
 		p.StartCamera()
-		// Wait for first frame
-		time.Sleep(500 * time.Millisecond)
 	}
-	return p.CameraClient.GetFrame()
+
+	// Wait for frame with timeout
+	frameBytes, err := p.CameraClient.WaitForFrame(DefaultCameraFrameTimeout)
+	if err != nil {
+		return "", err
+	}
+
+	return base64.StdEncoding.EncodeToString(frameBytes), nil
 }
 
 // GetCameraFrameBytes gets the latest camera frame as bytes (auto-starts camera if needed).
+// Waits up to DefaultCameraFrameTimeout for a frame to become available.
 func (p *Printer) GetCameraFrameBytes() ([]byte, error) {
 	// Auto-start camera if not running
 	if !p.CameraIsAlive() {
 		p.StartCamera()
-		// Wait for first frame
-		time.Sleep(500 * time.Millisecond)
 	}
-	return p.CameraClient.GetFrameBytes()
+
+	// Wait for frame with timeout
+	return p.CameraClient.WaitForFrame(DefaultCameraFrameTimeout)
+}
+
+// GetCameraFrameWithTimeout gets the latest camera frame as bytes with a custom timeout.
+// Auto-starts camera if needed.
+func (p *Printer) GetCameraFrameWithTimeout(timeout time.Duration) ([]byte, error) {
+	// Auto-start camera if not running
+	if !p.CameraIsAlive() {
+		p.StartCamera()
+	}
+
+	// Wait for frame with custom timeout
+	return p.CameraClient.WaitForFrame(timeout)
 }
 
 // GetCameraImage gets the latest camera frame as an image.Image (auto-starts camera if needed).
+// Waits up to DefaultCameraFrameTimeout for a frame to become available.
 func (p *Printer) GetCameraImage() (image.Image, error) {
 	frameBytes, err := p.GetCameraFrameBytes()
 	if err != nil {
@@ -721,6 +745,7 @@ func (p *Printer) GetCameraImage() (image.Image, error) {
 }
 
 // SaveCameraFrame saves the latest camera frame to a file (auto-starts camera if needed).
+// Waits up to DefaultCameraFrameTimeout for a frame to become available.
 func (p *Printer) SaveCameraFrame(filePath string) error {
 	frameBytes, err := p.GetCameraFrameBytes()
 	if err != nil {
@@ -730,14 +755,23 @@ func (p *Printer) SaveCameraFrame(filePath string) error {
 }
 
 // CaptureFrame captures a single frame and returns it (convenience method).
-// This starts the camera, captures one frame, and stops the camera.
+// This starts the camera, waits for one frame (up to 10 seconds), and stops the camera.
 func (p *Printer) CaptureFrame() ([]byte, error) {
 	// Start camera
 	p.StartCamera()
 	defer p.StopCamera()
 
-	// Wait for first frame
-	time.Sleep(500 * time.Millisecond)
+	// Wait for first frame with timeout
+	return p.CameraClient.WaitForFrame(DefaultCameraFrameTimeout)
+}
 
-	return p.GetCameraFrameBytes()
+// CaptureFrameWithTimeout captures a single frame with a custom timeout.
+// This starts the camera, waits for one frame, and stops the camera.
+func (p *Printer) CaptureFrameWithTimeout(timeout time.Duration) ([]byte, error) {
+	// Start camera
+	p.StartCamera()
+	defer p.StopCamera()
+
+	// Wait for first frame with custom timeout
+	return p.CameraClient.WaitForFrame(timeout)
 }

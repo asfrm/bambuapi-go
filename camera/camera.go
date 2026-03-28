@@ -134,6 +134,45 @@ func (c *PrinterCamera) GetFrameBytes() ([]byte, error) {
 	return frameCopy, nil
 }
 
+// WaitForFrame waits for a frame to become available with a timeout.
+// It polls every 100ms until a frame is received or the timeout is reached.
+// Returns the frame bytes or an error if timeout occurs.
+func (c *PrinterCamera) WaitForFrame(timeout time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-c.stopChan:
+			return nil, fmt.Errorf("camera stopped while waiting for frame")
+		case <-ticker.C:
+			c.mu.RLock()
+			frame := c.lastFrame
+			c.mu.RUnlock()
+
+			if frame != nil {
+				frameCopy := make([]byte, len(frame))
+				copy(frameCopy, frame)
+				return frameCopy, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("timeout waiting for camera frame (%v)", timeout)
+}
+
+// WaitForFrameWithStart starts the camera if not running and waits for a frame.
+// This is a convenience method that combines Start() and WaitForFrame().
+// Returns the frame bytes or an error if the camera fails to start or timeout occurs.
+func (c *PrinterCamera) WaitForFrameWithStart(timeout time.Duration) ([]byte, error) {
+	// Start camera if not already running
+	c.Start()
+
+	// Wait for frame with timeout
+	return c.WaitForFrame(timeout)
+}
+
 // buildAuthData builds the authentication data for the camera connection.
 func (c *PrinterCamera) buildAuthData() []byte {
 	authData := make([]byte, 0, 80)

@@ -589,13 +589,14 @@ func cmdCamera(p *printer.Printer, args []string) error {
 	outputFile := fs.String("o", "frame.jpg", "Output file path")
 	count := fs.Int("n", 1, "Number of frames to capture (0 for continuous until Ctrl+C)")
 	interval := fs.Duration("i", 1*time.Second, "Interval between frames (for multi-frame capture)")
+	timeout := fs.Duration("timeout", 10*time.Second, "Timeout for waiting for each frame")
 	fs.Parse(args)
 
 	if *count == 1 {
 		// Single frame capture
-		fmt.Println("Capturing camera frame...")
+		fmt.Printf("Capturing camera frame (timeout: %v)...\n", *timeout)
 
-		frameBytes, err := p.CaptureFrame()
+		frameBytes, err := p.CaptureFrameWithTimeout(*timeout)
 		if err != nil {
 			return fmt.Errorf("failed to capture frame: %w", err)
 		}
@@ -609,10 +610,11 @@ func cmdCamera(p *printer.Printer, args []string) error {
 	}
 
 	// Multi-frame capture
-	fmt.Printf("Capturing %d frames with %v interval...\n", *count, *interval)
+	fmt.Printf("Capturing %d frames with %v interval (timeout: %v per frame)...\n", *count, *interval, *timeout)
 
 	for i := 0; i < *count || *count == 0; i++ {
-		frameBytes, err := p.CaptureFrame()
+		fmt.Printf("Capturing frame %d... ", i+1)
+		frameBytes, err := p.CaptureFrameWithTimeout(*timeout)
 		if err != nil {
 			return fmt.Errorf("failed to capture frame %d: %w", i+1, err)
 		}
@@ -627,7 +629,7 @@ func cmdCamera(p *printer.Printer, args []string) error {
 			return fmt.Errorf("failed to save frame %d: %w", i+1, err)
 		}
 
-		fmt.Printf("Frame %d saved: %s (%d bytes)\n", i+1, filename, len(frameBytes))
+		fmt.Printf("saved: %s (%d bytes)\n", filename, len(frameBytes))
 
 		if *count > 0 && i < *count-1 {
 			time.Sleep(*interval)
