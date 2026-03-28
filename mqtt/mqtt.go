@@ -224,7 +224,6 @@ func (c *PrinterMQTTClient) onMessage(client mqtt.Client, msg mqtt.Message) {
 // manualUpdate updates internal data from received message.
 func (c *PrinterMQTTClient) manualUpdate(doc map[string]interface{}) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	for k, v := range doc {
 		if existing, ok := c.data[k]; ok {
@@ -240,14 +239,25 @@ func (c *PrinterMQTTClient) manualUpdate(doc map[string]interface{}) {
 		c.data[k] = v
 	}
 
-	debugLog.Printf("Updated data: %+v", c.data)
-
-	// Update firmware version if available
-	if firmwareVersion := c.getFirmwareVersion(); firmwareVersion != "" {
-		c.printerInfo.FirmwareVersion = firmwareVersion
-	}
-
 	c.ready = true
+	c.mu.Unlock()
+
+	// Update firmware version AFTER releasing lock to avoid deadlock
+	// (getFirmwareVersion acquires read lock)
+	if firmwareVersion := c.getFirmwareVersion(); firmwareVersion != "" {
+		c.mu.Lock()
+		c.printerInfo.FirmwareVersion = firmwareVersion
+		c.mu.Unlock()
+	}
+}
+
+// getMapKeys returns the top-level keys of a map for debugging
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // getPrintValue gets a value from the "print" section.
@@ -388,11 +398,9 @@ func (c *PrinterMQTTClient) publishCommand(payload map[string]interface{}) bool 
 	token := c.client.Publish(c.commandTopic, 1, false, jsonData)
 	// Use WaitTimeout instead of Wait to avoid indefinite blocking
 	if token.WaitTimeout(2 * time.Second) {
-		debugLog.Printf("Published command: %s", string(jsonData))
 		return token.Error() == nil
 	}
 	// Timeout occurred, but command may still have been sent
-	debugLog.Printf("Publish timeout (command likely sent): %s", string(jsonData))
 	return true
 }
 
@@ -1118,17 +1126,41 @@ func (c *PrinterMQTTClient) ProcessAMS() {
 
 	for k, amsUnit := range amsUnits {
 		if amsData, ok := amsUnit.(map[string]interface{}); ok {
+			// Parse humidity (can be string or float64)
 			humidity := 0
-			if h, ok := amsData["humidity"].(float64); ok {
-				humidity = int(h)
+			if h, ok := amsData["humidity"]; ok {
+				switch v := h.(type) {
+				case float64:
+					humidity = int(v)
+				case string:
+					fmt.Sscanf(v, "%d", &humidity)
+				case int:
+					humidity = v
+				}
 			}
+			// Parse temperature (can be string or float64)
 			temp := 0.0
-			if t, ok := amsData["temp"].(float64); ok {
-				temp = t
+			if t, ok := amsData["temp"]; ok {
+				switch v := t.(type) {
+				case float64:
+					temp = v
+				case string:
+					fmt.Sscanf(v, "%f", &temp)
+				case int:
+					temp = float64(v)
+				}
 			}
+			// Parse ID (can be string or float64)
 			id := k
-			if i, ok := amsData["id"].(float64); ok {
-				id = int(i)
+			if i, ok := amsData["id"]; ok {
+				switch v := i.(type) {
+				case float64:
+					id = int(v)
+				case string:
+					fmt.Sscanf(v, "%d", &id)
+				case int:
+					id = v
+				}
 			}
 
 			amsUnit := ams.NewAMS(humidity, temp)
@@ -1136,9 +1168,17 @@ func (c *PrinterMQTTClient) ProcessAMS() {
 			if trays, ok := amsData["tray"].([]interface{}); ok {
 				for _, tray := range trays {
 					if trayData, ok := tray.(map[string]interface{}); ok {
+						// Parse tray ID (can be string or float64)
 						trayID := 0
-						if tid, ok := trayData["id"].(float64); ok {
-							trayID = int(tid)
+						if tid, ok := trayData["id"]; ok {
+							switch v := tid.(type) {
+							case float64:
+								trayID = int(v)
+							case string:
+								fmt.Sscanf(v, "%d", &trayID)
+							case int:
+								trayID = v
+							}
 						}
 						if _, ok := trayData["n"]; ok {
 							trayInfo := filament.FilamentTrayFromDict(trayData)

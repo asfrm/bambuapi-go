@@ -118,8 +118,8 @@ func connectMQTT(cfg Config) (*printer.Printer, error) {
 		return nil, fmt.Errorf("failed to start MQTT client: %w", err)
 	}
 
-	// Wait for MQTT connection and initial data (max 15 seconds)
-	timeout := time.After(15 * time.Second)
+	// Wait for MQTT connection (max 10 seconds)
+	timeout := time.After(10 * time.Second)
 	ticker := time.NewTicker(20 * time.Millisecond)
 
 	for {
@@ -131,9 +131,23 @@ func connectMQTT(cfg Config) (*printer.Printer, error) {
 		case <-ticker.C:
 			if p.MQTTClientConnected() {
 				ticker.Stop()
-				// Connection established, wait for MQTT traffic to settle
-				// This ensures we can acquire the read lock for status queries
-				time.Sleep(3 * time.Second)
+				// Connection established, wait for initial data
+				time.Sleep(300 * time.Millisecond)
+				// Request full state
+				p.RequestFullState()
+				// Wait for full state to arrive (check for key fields)
+				for i := 0; i < 25; i++ { // 2.5 seconds max
+					dump := p.MQTTDump()
+					if printData, ok := dump["print"].(map[string]interface{}); ok {
+						// Check for key fields that indicate full state
+						if _, hasBed := printData["bed_temper"]; hasBed {
+							if _, hasAms := printData["ams"]; hasAms {
+								return p, nil
+							}
+						}
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
 				return p, nil
 			}
 		}
@@ -196,7 +210,7 @@ func printStatusHuman(p *printer.Printer) {
 	fmt.Printf("Aux Fan:        %d RPM\n", p.GetAuxFanSpeed())
 	fmt.Printf("Chamber Fan:    %d RPM\n", p.GetChamberFanSpeed())
 	fmt.Println()
-	fmt.Printf("WiFi Signal:    %s dBm\n", p.WifiSignal())
+	fmt.Printf("WiFi Signal:    %s\n", p.WifiSignal())
 }
 
 // formatDuration formats seconds into a human-readable duration.
