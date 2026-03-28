@@ -72,6 +72,17 @@ func (p *Printer) MQTTClientReady() bool {
 	return p.MQTTClient.Ready()
 }
 
+// SetMQTTAggressiveMode sets whether to send aggressive pushall/info requests on connect.
+// Set to false for CLI usage to avoid blocking.
+func (p *Printer) SetMQTTAggressiveMode(enabled bool) {
+	p.MQTTClient.SetPushallAggressive(enabled)
+}
+
+// RequestFullState requests a full state update from the printer.
+func (p *Printer) RequestFullState() bool {
+	return p.MQTTClient.RequestFullState()
+}
+
 // CurrentLayerNum gets the current layer number.
 func (p *Printer) CurrentLayerNum() int {
 	return p.MQTTClient.CurrentLayerNum()

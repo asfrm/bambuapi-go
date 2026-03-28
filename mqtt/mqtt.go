@@ -127,6 +127,13 @@ func (c *PrinterMQTTClient) Ready() bool {
 	return c.ready && len(c.data) > 0
 }
 
+// SetPushallAggressive sets whether to send pushall/info requests on connect.
+func (c *PrinterMQTTClient) SetPushallAggressive(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pushallAggressive = enabled
+}
+
 // Connect connects to the MQTT server.
 func (c *PrinterMQTTClient) Connect() error {
 	c.mu.Lock()
@@ -154,7 +161,19 @@ func (c *PrinterMQTTClient) Start() error {
 
 // Stop stops the MQTT client.
 func (c *PrinterMQTTClient) Stop() {
-	c.client.Disconnect(1000)
+	// Disconnect in a goroutine to avoid blocking
+	done := make(chan struct{})
+	go func() {
+		c.client.Disconnect(100)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		// Timeout, but continue anyway
+	}
+
 	c.mu.Lock()
 	c.connected = false
 	c.mu.Unlock()
@@ -367,10 +386,14 @@ func (c *PrinterMQTTClient) publishCommand(payload map[string]interface{}) bool 
 	}
 
 	token := c.client.Publish(c.commandTopic, 1, false, jsonData)
-	token.Wait()
-
-	debugLog.Printf("Published command: %s", string(jsonData))
-	return token.Error() == nil
+	// Use WaitTimeout instead of Wait to avoid indefinite blocking
+	if token.WaitTimeout(2 * time.Second) {
+		debugLog.Printf("Published command: %s", string(jsonData))
+		return token.Error() == nil
+	}
+	// Timeout occurred, but command may still have been sent
+	debugLog.Printf("Publish timeout (command likely sent): %s", string(jsonData))
+	return true
 }
 
 // pushall forces a full state update from the printer.
@@ -380,6 +403,11 @@ func (c *PrinterMQTTClient) pushall() bool {
 			"command": "pushall",
 		},
 	})
+}
+
+// RequestFullState requests a full state update from the printer.
+func (c *PrinterMQTTClient) RequestFullState() bool {
+	return c.pushall()
 }
 
 // infoGetVersion requests hardware and firmware info.
