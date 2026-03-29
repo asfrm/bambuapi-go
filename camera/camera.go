@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -23,11 +22,14 @@ var (
 	infoLog  = log.New(os.Stdout, "[CAM INFO] ", log.Ldate|log.Ltime)
 )
 
+// Maximum image size to prevent memory exhaustion (10MB)
+const maxImageSize = 10 * 1024 * 1024
+
 func init() {
 	if os.Getenv("BAMBU_DEBUG") == "1" {
 		debugLog = log.New(os.Stdout, "[CAM DEBUG] ", log.Ldate|log.Ltime|log.Lmicroseconds|log.Lshortfile)
 	} else {
-		debugLog = log.New(ioutil.Discard, "", 0)
+		debugLog = log.New(io.Discard, "", 0)
 	}
 }
 
@@ -93,9 +95,20 @@ func (c *PrinterCamera) Stop() {
 
 	close(c.stopChan)
 
+	// Wait for thread to terminate with timeout to prevent hanging
 	if c.thread != nil {
-		<-c.thread
-		c.thread = nil
+		done := make(chan struct{})
+		go func() {
+			<-c.thread
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			c.thread = nil
+		case <-time.After(2 * time.Second):
+			errorLog.Println("Camera thread did not terminate cleanly")
+		}
 	}
 
 	infoLog.Println("Camera client stopped")
@@ -213,6 +226,13 @@ func (c *PrinterCamera) retriever() {
 		MinVersion:         tls.VersionTLS12,
 	}
 
+	// Buffer pool for read chunks to reduce GC pressure
+	bufPool := sync.Pool{
+		New: func() interface{} {
+			return make([]byte, readChunkSize)
+		},
+	}
+
 	for c.alive {
 		// Fix: Use net.JoinHostPort for proper IPv6 support
 		conn, err := net.Dial("tcp", net.JoinHostPort(c.hostname, strconv.Itoa(c.port)))
@@ -256,10 +276,11 @@ func (c *PrinterCamera) retriever() {
 			default:
 			}
 
-			buf := make([]byte, readChunkSize)
+			buf := bufPool.Get().([]byte)
 			n, err := tlsConn.Read(buf)
 
 			if err != nil {
+				bufPool.Put(buf)
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					time.Sleep(1 * time.Second)
 					continue
@@ -278,6 +299,14 @@ func (c *PrinterCamera) retriever() {
 			if img != nil && n > 0 {
 				debugLog.Println("Appending to image")
 				img = append(img, buf[:n]...)
+
+				// Check for maximum image size to prevent memory exhaustion
+				if len(img) > maxImageSize {
+					errorLog.Printf("Image exceeds maximum size (%d > %d), resetting", len(img), maxImageSize)
+					img = nil
+					bufPool.Put(buf)
+					continue
+				}
 
 				if len(img) > payloadSize {
 					img = nil
@@ -298,18 +327,22 @@ func (c *PrinterCamera) retriever() {
 			} else if n == 16 {
 				debugLog.Println("Got header")
 				connectAttempts = 0
-				img = make([]byte, 0)
+				// Pre-allocate image buffer with expected capacity to reduce reallocations
+				img = make([]byte, 0, payloadSize)
 				// Payload size is in bytes 0-3 (little-endian, 3 bytes)
 				payloadSize = int(binary.LittleEndian.Uint32(append(buf[:3], 0)))
 			} else if n == 0 {
+				bufPool.Put(buf)
 				time.Sleep(5 * time.Second)
 				errorLog.Println("Wrong access code or IP")
 				break
 			} else {
+				bufPool.Put(buf)
 				errorLog.Println("Something bad happened")
 				time.Sleep(1 * time.Second)
 				break
 			}
+			bufPool.Put(buf)
 		}
 
 		tlsConn.Close()

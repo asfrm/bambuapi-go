@@ -4,6 +4,23 @@ Native Go implementation of the Bambu Lab 3D Printer API.
 
 > **Note:** This is a native Go implementation of the Bambu Lab printer API for controlling Bambu Lab 3D printers.
 
+## What's New in v1.1
+
+### Security
+- **Configurable TLS Verification** - Enable certificate verification for production use
+- **FTP Path Sanitization** - Automatic protection against path traversal attacks
+- **Input Validation** - AMS/tray ID range validation (0-3)
+
+### Performance
+- **Streaming FTP Uploads** - No more memory buffering for large files
+- **Camera Memory Pool** - Reduced GC pressure with buffer pooling
+- **Configurable Timeouts** - Adjustable MQTT command timeout
+
+### Bug Fixes
+- Fixed race conditions in `Connect()` and `ConnectWithContext()`
+- Fixed goroutine leaks in camera and MQTT stop procedures
+- Fixed unsafe type assertions and G-code validation regex
+
 ## Features
 
 - **MQTT Control**: Full control over printer via MQTT protocol
@@ -55,6 +72,38 @@ func main() {
     // Control printer
     p.TurnLightOn()
     p.HomePrinter()
+}
+```
+
+## Secure Configuration (Production)
+
+By default, TLS certificate verification is disabled for backward compatibility. For production deployments:
+
+```go
+package main
+
+import (
+    "time"
+    "github.com/asfrm/bambuapi-go/printer"
+    "github.com/asfrm/bambuapi-go/mqtt"
+)
+
+func main() {
+    p := printer.NewPrinter("192.168.1.200", "YOUR_ACCESS_CODE", "YOUR_SERIAL")
+    
+    // Configure secure MQTT client
+    p.MQTTClient = mqtt.NewPrinterMQTTClientWithOptions(
+        "192.168.1.200", "YOUR_ACCESS_CODE", "YOUR_SERIAL", "bblp", 8883, 60, 60, true, false,
+        mqtt.WithTLSInsecureSkipVerify(false),   // Enable cert verification
+        mqtt.WithCommandTimeout(10*time.Second), // Increase timeout
+    )
+    
+    if err := p.Connect(); err != nil {
+        panic(err)
+    }
+    defer p.Disconnect()
+    
+    // Use printer...
 }
 ```
 
@@ -148,9 +197,14 @@ if err != nil {
 ### File Operations (FTP)
 
 ```go
-// Upload file
+// Upload file (path is automatically sanitized for security)
 file, _ := os.Open("print.gcode")
 p.UploadFile(file, "my_print.gcode")
+
+// Upload with context (cancellable)
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+defer cancel()
+p.FTPClient.UploadFileWithContext(ctx, file, "large_print.3mf")
 
 // Start print
 p.StartPrint("my_print.gcode", 1, true, []int{0}, nil, true)
@@ -288,18 +342,28 @@ Detailed status including:
 1. Ensure printer is on the same network
 2. Verify access code is correct (8 digits)
 3. Check firewall settings (ports 8883, 6000, 990)
+4. **TLS Issues**: If using `WithTLSInsecureSkipVerify(false)`, ensure printer has valid certificate
 
 ### Camera Not Working
 
 - X1 series: Camera support may be limited
 - Ensure camera is enabled in printer settings
 - Check access code permissions
+- **Memory Limit**: Images larger than 10MB are rejected to prevent OOM
 
 ### FTP Upload Fails
 
 - Verify printer is idle or in safe state
 - Check available storage on printer
 - Ensure file name is valid
+- **Path Security**: Paths with `..` or absolute paths are automatically sanitized
+- **Large Files**: Use `UploadFileWithContext()` for cancellable uploads of large files
+
+### Command Timeouts
+
+- Default MQTT command timeout is 5 seconds
+- Increase with `mqtt.WithCommandTimeout(10*time.Second)` if on slow network
+- Commands may timeout if printer is busy or in error state
 
 ## Project Structure
 
@@ -313,6 +377,9 @@ bambuapi-go/
 ├── filament/         # Filament types and settings
 ├── printerinfo/      # Printer information types
 ├── states/           # Printer state types
+├── fleet/            # Multi-printer fleet management
+├── internal/
+│   └── util/         # Type conversion utilities
 └── examples/         # Example applications
 ```
 

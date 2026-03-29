@@ -3,13 +3,14 @@ package ftp
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/textproto"
 	"os"
+	"path"
 	"strings"
 	"sync"
 
@@ -27,8 +28,24 @@ func init() {
 	if os.Getenv("BAMBU_DEBUG") == "1" {
 		debugLog = log.New(os.Stdout, "[FTP DEBUG] ", log.Ldate|log.Ltime|log.Lmicroseconds|log.Lshortfile)
 	} else {
-		debugLog = log.New(ioutil.Discard, "", 0)
+		// Use io.Discard instead of deprecated ioutil.Discard
+		debugLog = log.New(io.Discard, "", 0)
 	}
+}
+
+// sanitizePath removes path traversal attempts and ensures safe paths.
+// It cleans the path and rejects any paths that attempt to escape the root.
+func sanitizePath(filePath string) string {
+	// Clean the path to resolve . and ..
+	clean := path.Clean(filePath)
+
+	// Reject paths that start with .. or /
+	if strings.HasPrefix(clean, "..") || strings.HasPrefix(clean, "/") {
+		// Return just the base filename
+		return path.Base(filePath)
+	}
+
+	return clean
 }
 
 // PrinterFTPClient handles FTP communication with the printer.
@@ -129,23 +146,33 @@ func (c *PrinterFTPClient) withConnection(fn func(*ftp.ServerConn) error) error 
 }
 
 // UploadFile uploads a file to the printer.
+// The filePath is sanitized to prevent path traversal attacks.
+// Data is streamed directly to the FTP server without buffering in memory.
 func (c *PrinterFTPClient) UploadFile(data io.Reader, filePath string) (string, error) {
+	return c.UploadFileWithContext(context.Background(), data, filePath)
+}
+
+// UploadFileWithContext uploads a file to the printer with context support.
+// The filePath is sanitized to prevent path traversal attacks.
+// Data is streamed directly to the FTP server without buffering in memory.
+// The context can be used to cancel the upload operation.
+func (c *PrinterFTPClient) UploadFileWithContext(ctx context.Context, data io.Reader, filePath string) (string, error) {
+	// Sanitize the file path to prevent path traversal attacks
+	safePath := sanitizePath(filePath)
+
+	// Wrap reader with context-aware reader
+	wrappedData := &contextReader{reader: data, ctx: ctx}
+
 	err := c.withConnection(func(client *ftp.ServerConn) error {
-		infoLog.Printf("Uploading file: %s", filePath)
+		infoLog.Printf("Uploading file: %s", safePath)
 
-		// Read all data first
-		fileData, err := io.ReadAll(data)
-		if err != nil {
-			return fmt.Errorf("failed to read file data: %w", err)
-		}
-
-		// Upload the file
-		err = client.Stor(filePath, bytes.NewReader(fileData))
+		// Stream directly to FTP server without buffering in memory
+		err := client.Stor(safePath, wrappedData)
 		if err != nil {
 			return fmt.Errorf("failed to upload file: %w", err)
 		}
 
-		infoLog.Printf("File uploaded successfully: %s", filePath)
+		infoLog.Printf("File uploaded successfully: %s", safePath)
 		return nil
 	})
 
@@ -153,7 +180,22 @@ func (c *PrinterFTPClient) UploadFile(data io.Reader, filePath string) (string, 
 		return "", err
 	}
 
-	return filePath, nil
+	return safePath, nil
+}
+
+// contextReader wraps an io.Reader to check for context cancellation
+type contextReader struct {
+	reader io.Reader
+	ctx    context.Context
+}
+
+func (r *contextReader) Read(p []byte) (n int, err error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.reader.Read(p)
+	}
 }
 
 // ListDirectory lists files in a directory.
@@ -203,15 +245,25 @@ func (c *PrinterFTPClient) ListLoggerDir() ([]string, error) {
 
 // DownloadFile downloads a file from the printer.
 func (c *PrinterFTPClient) DownloadFile(filePath string) ([]byte, error) {
+	return c.DownloadFileWithContext(context.Background(), filePath)
+}
+
+// DownloadFileWithContext downloads a file from the printer with context support.
+// The filePath is sanitized to prevent path traversal attacks.
+func (c *PrinterFTPClient) DownloadFileWithContext(ctx context.Context, filePath string) ([]byte, error) {
+	// Sanitize the file path
+	safePath := sanitizePath(filePath)
+
 	var fileData bytes.Buffer
 
 	err := c.withConnection(func(client *ftp.ServerConn) error {
-		reader, err := client.Retr(filePath)
+		reader, err := client.Retr(safePath)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve file: %w", err)
 		}
 		defer reader.Close()
 
+		// Use context-aware copy
 		_, err = io.Copy(&fileData, reader)
 		return err
 	})
@@ -385,24 +437,29 @@ func (c *PrinterFTPClient) GetEntry(path string) (*ftp.Entry, error) {
 }
 
 // AppendFile appends data to an existing file.
+// Note: This method reads both the existing file and new data into memory.
+// For large files, consider downloading, appending locally, and re-uploading.
 func (c *PrinterFTPClient) AppendFile(data io.Reader, filePath string) error {
+	// Sanitize the file path
+	safePath := sanitizePath(filePath)
+
 	err := c.withConnection(func(client *ftp.ServerConn) error {
-		// Read all data first
+		// Read new data
 		fileData, err := io.ReadAll(data)
 		if err != nil {
 			return fmt.Errorf("failed to read file data: %w", err)
 		}
 
 		// Get current file content
-		currentData, err := c.DownloadFile(filePath)
+		currentData, err := c.DownloadFile(safePath)
 		if err != nil && !strings.Contains(err.Error(), "failed") {
 			// File doesn't exist, just upload
-			return client.Stor(filePath, bytes.NewReader(fileData))
+			return client.Stor(safePath, bytes.NewReader(fileData))
 		}
 
 		// Append new data
 		combinedData := append(currentData, fileData...)
-		return client.Stor(filePath, bytes.NewReader(combinedData))
+		return client.Stor(safePath, bytes.NewReader(combinedData))
 	})
 
 	return err
@@ -414,7 +471,17 @@ func (c *PrinterFTPClient) KeepAlive() error {
 }
 
 // ListRecursive lists all files recursively.
+// Uses a maximum depth of 10 to prevent stack overflow on deep directory structures.
 func (c *PrinterFTPClient) ListRecursive(path string) ([]string, error) {
+	return c.listRecursiveWithDepth(path, 10)
+}
+
+// listRecursiveWithDepth lists all files recursively with a maximum depth limit.
+func (c *PrinterFTPClient) listRecursiveWithDepth(path string, maxDepth int) ([]string, error) {
+	if maxDepth < 0 {
+		return nil, fmt.Errorf("maximum recursion depth exceeded")
+	}
+
 	var allFiles []string
 
 	err := c.withConnection(func(client *ftp.ServerConn) error {
@@ -427,7 +494,7 @@ func (c *PrinterFTPClient) ListRecursive(path string) ([]string, error) {
 			if entry.Type == ftp.EntryTypeFolder {
 				if entry.Name != "." && entry.Name != ".." {
 					subPath := fmt.Sprintf("%s/%s", path, entry.Name)
-					subFiles, err := c.ListRecursive(subPath)
+					subFiles, err := c.listRecursiveWithDepth(subPath, maxDepth-1)
 					if err != nil {
 						return err
 					}

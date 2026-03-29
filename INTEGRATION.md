@@ -2,9 +2,38 @@
 
 > **Comprehensive API reference and cheat sheet for integrating Bambu Lab 3D printers into Go applications**
 
-**SDK Version:** 1.0  
-**Go Version:** 1.21+  
+**SDK Version:** 1.1
+**Go Version:** 1.21+
 **Last Updated:** 2026-03-29
+
+---
+
+## What's New in v1.1
+
+### Security Enhancements
+
+- **Configurable TLS Verification**: Enable certificate verification for production deployments
+- **FTP Path Sanitization**: All file paths are now sanitized to prevent path traversal attacks
+- **Input Validation**: AMS/tray ID validation (0-3 range) to prevent invalid commands
+
+### Performance Improvements
+
+- **Streaming FTP Uploads**: Files are now streamed directly without buffering in memory
+- **Camera Memory Pool**: Reduced GC pressure with buffer pooling and 10MB max image size limit
+- **Configurable Command Timeout**: Adjustable MQTT command timeout (default: 5s)
+
+### New Features
+
+- **Context Support**: `UploadFileWithContext()` and `DownloadFileWithContext()` for cancellable operations
+- **MQTT Client Options**: `NewPrinterMQTTClientWithOptions()` for fine-grained configuration
+- **Recursive List Depth Limit**: Prevents stack overflow on deep directory structures (max: 10 levels)
+
+### Bug Fixes
+
+- **Connection Race Conditions**: Fixed break statement bugs in `Connect()` and `ConnectWithContext()`
+- **Goroutine Leaks**: Fixed camera and MQTT stop procedures with proper timeout handling
+- **Type Assertion Safety**: Fixed unsafe type assertions in `StartPrint3MF()`
+- **G-code Validation**: Fixed regex to properly handle negative numbers (e.g., `X-100.5`)
 
 ---
 
@@ -211,6 +240,42 @@ defer pool.DisconnectAll()
 | `BAMBU_SERIAL` | Printer serial number | - |
 | `BAMBU_ACCESS_CODE` | Printer access code (8 digits) | - |
 | `BAMBU_DEBUG=1` | Enable debug logging | off |
+
+### Security Configuration
+
+**IMPORTANT:** By default, TLS certificate verification is disabled for backward compatibility. For production deployments, enable certificate verification:
+
+```go
+import (
+    "time"
+    "github.com/asfrm/bambuapi-go/printer"
+    "github.com/asfrm/bambuapi-go/mqtt"
+)
+
+// Create printer instance
+p := printer.NewPrinter(ip, accessCode, serial)
+
+// Configure secure MQTT client
+p.MQTTClient = mqtt.NewPrinterMQTTClientWithOptions(
+    ip, accessCode, serial, "bblp", 8883, 60, 60, true, false,
+    mqtt.WithTLSInsecureSkipVerify(false),  // Enable certificate verification
+    mqtt.WithCommandTimeout(10*time.Second), // Increase timeout for slow networks
+)
+
+// Connect
+if err := p.Connect(); err != nil {
+    return err
+}
+```
+
+### MQTT Client Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `WithTLSInsecureSkipVerify(false)` | Enable TLS certificate verification | `true` (insecure) |
+| `WithCommandTimeout(duration)` | Set MQTT command publish timeout | `5s` |
+
+**Security Warning:** Setting `WithTLSInsecureSkipVerify(false)` enables certificate verification, which protects against man-in-the-middle attacks. However, this requires the printer to have a valid certificate. Use `true` only for testing or when you understand the security implications.
 
 ---
 
@@ -432,7 +497,7 @@ uploadedPath, err := p.SubmitPrintJobFromFile(
 ### Manual Control (Advanced)
 
 ```go
-// Step 1: Upload file
+// Step 1: Upload file (path is automatically sanitized)
 uploadedPath, err := p.UploadFile(fileData, "model.3mf")
 if err != nil {
     return err
@@ -451,6 +516,29 @@ if !success {
     return fmt.Errorf("failed to start print")
 }
 ```
+
+### FTP Upload with Context (Cancellable)
+
+```go
+// Upload with context for cancellation support
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+defer cancel()
+
+uploadedPath, err := p.FTPClient.UploadFileWithContext(ctx, fileData, "model.3mf")
+if err != nil {
+    if ctx.Err() != nil {
+        // Upload was cancelled
+        return fmt.Errorf("upload cancelled: %w", ctx.Err())
+    }
+    return err
+}
+```
+
+### FTP Security Notes
+
+- **Path Sanitization**: All file paths are automatically sanitized to prevent path traversal attacks. Paths like `../../../etc/passwd` are rejected.
+- **Streaming Uploads**: Files are streamed directly to the printer without buffering in memory, preventing OOM errors on large files.
+- **Depth Limit**: `ListRecursive()` has a maximum depth of 10 levels to prevent stack overflow.
 
 ### Print Control
 
@@ -510,6 +598,12 @@ for range ticker.C {
 | `GetCameraImage()` | `image.Image, error` | Get decoded image |
 | `SaveCameraFrame(path)` | `error` | Save to file |
 | `CameraIsAlive()` | `bool` | Check if stream is running |
+
+### Camera Performance Notes
+
+- **Memory Limit**: Maximum image size is limited to 10MB to prevent memory exhaustion
+- **Buffer Pooling**: Camera uses `sync.Pool` for read buffers to reduce GC pressure
+- **Graceful Stop**: `StopCamera()` has a 2-second timeout to prevent hanging if the camera thread is blocked
 
 ### WebSocket Integration Pattern
 

@@ -10,6 +10,7 @@ import (
 	_ "image/jpeg"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -111,6 +112,7 @@ func (p *Printer) Connect() error {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
+connectionLoop:
 	for {
 		select {
 		case <-timeout:
@@ -118,11 +120,9 @@ func (p *Printer) Connect() error {
 			return fmt.Errorf("timeout waiting for MQTT connection")
 		case <-ticker.C:
 			if p.MQTTClient.IsConnected() {
-				ticker.Stop()
-				break
+				break connectionLoop
 			}
 		}
-		break
 	}
 
 	// Wait for initial data payload
@@ -195,6 +195,7 @@ func (p *Printer) ConnectWithContext(ctx context.Context) error {
 	connectionTicker := time.NewTicker(50 * time.Millisecond)
 	defer connectionTicker.Stop()
 
+connectionLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -202,10 +203,9 @@ func (p *Printer) ConnectWithContext(ctx context.Context) error {
 			return fmt.Errorf("connection cancelled: %w", ctx.Err())
 		case <-connectionTicker.C:
 			if p.MQTTClient.IsConnected() {
-				break
+				break connectionLoop
 			}
 		}
-		break
 	}
 
 	// Wait for initial data payload with context
@@ -545,7 +545,8 @@ func (p *Printer) SubmitPrintJobFromFile(localPath string, plateNumber interface
 	}
 	defer file.Close()
 
-	filename := fmt.Sprintf("%d_%s", time.Now().Unix(), localPath)
+	// Use only the base filename to avoid exposing local directory structure
+	filename := fmt.Sprintf("%d_%s", time.Now().Unix(), filepath.Base(localPath))
 	return p.SubmitPrintJob(file, filename, plateNumber, useAMS, amsMapping, flowCalibration, bedType)
 }
 

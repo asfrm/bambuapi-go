@@ -70,10 +70,42 @@ type PrinterMQTTClient struct {
 	// Callback system for state updates
 	onUpdateCallback StateUpdateCallback
 	updateChannel    chan struct{}
+
+	// Command timeout for publish operations (default: 2 seconds)
+	commandTimeout time.Duration
+
+	// TLS configuration
+	skipTLSVerify bool
+}
+
+// MQTTClientOption is a function type for configuring MQTT client options.
+type MQTTClientOption func(*PrinterMQTTClient)
+
+// WithTLSInsecureSkipVerify sets whether to skip TLS certificate verification.
+// WARNING: Setting this to true makes the connection vulnerable to man-in-the-middle attacks.
+// Only use for testing or when you understand the security implications.
+func WithTLSInsecureSkipVerify(insecure bool) MQTTClientOption {
+	return func(c *PrinterMQTTClient) {
+		c.skipTLSVerify = insecure
+	}
+}
+
+// WithCommandTimeout sets the timeout for MQTT command publishing.
+func WithCommandTimeout(timeout time.Duration) MQTTClientOption {
+	return func(c *PrinterMQTTClient) {
+		c.commandTimeout = timeout
+	}
 }
 
 // NewPrinterMQTTClient creates a new MQTT client.
 func NewPrinterMQTTClient(hostname, access, printerSerial string, username string, port, timeout, pushallTimeout int, pushallOnConnect, strict bool) *PrinterMQTTClient {
+	return NewPrinterMQTTClientWithOptions(hostname, access, printerSerial, username, port, timeout, pushallTimeout, pushallOnConnect, strict,
+		WithTLSInsecureSkipVerify(true),   // Default to insecure for backward compatibility
+		WithCommandTimeout(5*time.Second)) // Increased timeout for better reliability
+}
+
+// NewPrinterMQTTClientWithOptions creates a new MQTT client with custom options.
+func NewPrinterMQTTClientWithOptions(hostname, access, printerSerial string, username string, port, timeout, pushallTimeout int, pushallOnConnect, strict bool, opts ...MQTTClientOption) *PrinterMQTTClient {
 	if username == "" {
 		username = "bblp"
 	}
@@ -105,29 +137,36 @@ func NewPrinterMQTTClient(hostname, access, printerSerial string, username strin
 			PrinterType:     printerinfo.PrinterTypeP1S,
 			FirmwareVersion: "01.04.00.00",
 		},
-		updateChannel: make(chan struct{}, 10), // Buffered channel to avoid blocking
+		updateChannel:  make(chan struct{}, 10), // Buffered channel to avoid blocking
+		commandTimeout: 5 * time.Second,         // Default timeout
+		skipTLSVerify:  true,                    // Default to insecure for backward compatibility
 	}
 
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(fmt.Sprintf("tls://%s:%d", hostname, port))
-	opts.SetUsername(username)
-	opts.SetPassword(access)
-	opts.SetClientID(printerSerial)
-	opts.SetAutoReconnect(true)
-	opts.SetConnectRetry(true)
-	opts.SetConnectRetryInterval(5 * time.Second)
-	opts.SetConnectionLostHandler(c.onConnectionLost)
-	opts.SetOnConnectHandler(c.onConnect)
-	opts.SetDefaultPublishHandler(c.onMessage)
+	// Apply options
+	for _, opt := range opts {
+		opt(c)
+	}
 
-	// TLS configuration
+	clientOpts := mqtt.NewClientOptions()
+	clientOpts.AddBroker(fmt.Sprintf("tls://%s:%d", hostname, port))
+	clientOpts.SetUsername(username)
+	clientOpts.SetPassword(access)
+	clientOpts.SetClientID(printerSerial)
+	clientOpts.SetAutoReconnect(true)
+	clientOpts.SetConnectRetry(true)
+	clientOpts.SetConnectRetryInterval(5 * time.Second)
+	clientOpts.SetConnectionLostHandler(c.onConnectionLost)
+	clientOpts.SetOnConnectHandler(c.onConnect)
+	clientOpts.SetDefaultPublishHandler(c.onMessage)
+
+	// TLS configuration with configurable verification
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: c.skipTLSVerify,
 		MinVersion:         tls.VersionTLS12,
 	}
-	opts.SetTLSConfig(tlsConfig)
+	clientOpts.SetTLSConfig(tlsConfig)
 
-	c.client = mqtt.NewClient(opts)
+	c.client = mqtt.NewClient(clientOpts)
 
 	return c
 }
@@ -221,8 +260,10 @@ func (c *PrinterMQTTClient) Stop() {
 
 	select {
 	case <-done:
+		// Disconnect completed successfully
 	case <-time.After(500 * time.Millisecond):
-		// Timeout, but continue anyway
+		// Timeout, but continue anyway - disconnect is best-effort
+		warnLog.Println("MQTT disconnect timeout, continuing...")
 	}
 
 	c.mu.Lock()
@@ -451,11 +492,16 @@ func (c *PrinterMQTTClient) publishCommand(payload map[string]interface{}) bool 
 
 	token := c.client.Publish(c.commandTopic, 1, false, jsonData)
 	// Use WaitTimeout instead of Wait to avoid indefinite blocking
-	if token.WaitTimeout(2 * time.Second) {
-		return token.Error() == nil
+	if token.WaitTimeout(c.commandTimeout) {
+		if err := token.Error(); err != nil {
+			errorLog.Printf("Command publish error: %v", err)
+			return false
+		}
+		return true
 	}
-	// Timeout occurred, but command may still have been sent
-	return true
+	// Timeout occurred - command may not have been sent
+	warnLog.Printf("Command publish timeout (%v)", c.commandTimeout)
+	return false
 }
 
 // pushall forces a full state update from the printer.
@@ -721,7 +767,8 @@ func isValidGcode(line string) bool {
 
 	// Check for proper parameter formatting
 	tokens := strings.Fields(line)
-	paramRegex := regexp.MustCompile(`^[A-Z]-?\d+(\.\d+)?$`)
+	// Fixed regex to properly handle negative numbers like X-100.5
+	paramRegex := regexp.MustCompile(`^[A-Z]-?\d*\.?\d+$`)
 
 	for i, token := range tokens {
 		if i == 0 {
@@ -944,7 +991,9 @@ func (c *PrinterMQTTClient) StartPrint3MF(filename string, plateNumber interface
 	}
 
 	if skipObjects != nil && len(skipObjects) > 0 {
-		payload["print"].(map[string]interface{})["skip_objects"] = skipObjects
+		if printMap, ok := payload["print"].(map[string]interface{}); ok {
+			printMap["skip_objects"] = skipObjects
+		}
 	}
 
 	return c.publishCommand(payload)
@@ -1019,6 +1068,18 @@ func (c *PrinterMQTTClient) GetSkippedObjects() []int {
 
 // SetPrinterFilament sets the printer filament settings.
 func (c *PrinterMQTTClient) SetPrinterFilament(filament filament.AMSFilamentSettings, color string, amsID, trayID int) bool {
+	// Validate AMS ID (0-3 for up to 4 AMS units)
+	if amsID < 0 || amsID > 3 {
+		errorLog.Printf("Invalid AMS ID: %d (must be 0-3)", amsID)
+		return false
+	}
+
+	// Validate tray ID (0-3 for 4 slots per AMS)
+	if trayID < 0 || trayID > 3 {
+		errorLog.Printf("Invalid tray ID: %d (must be 0-3)", trayID)
+		return false
+	}
+
 	if len(color) != 6 {
 		errorLog.Println("Color must be a 6 character hex code")
 		return false
