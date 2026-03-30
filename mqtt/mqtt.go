@@ -74,8 +74,8 @@ type PrinterMQTTClient struct {
 	// Command timeout for publish operations (default: 2 seconds)
 	commandTimeout time.Duration
 
-	// LastCommandSent tracks when the last command was sent (for data receipt correlation)
-	LastCommandSent time.Time
+	// lastCommandSent tracks when the last command was sent (for data receipt correlation)
+	lastCommandSent time.Time
 
 	// TLS configuration
 	skipTLSVerify bool
@@ -207,6 +207,14 @@ func (c *PrinterMQTTClient) SetStateUpdateCallback(callback StateUpdateCallback)
 // The caller is responsible for reading from the channel to prevent blocking.
 func (c *PrinterMQTTClient) GetUpdateChannel() <-chan struct{} {
 	return c.updateChannel
+}
+
+// GetLastCommandSent returns the timestamp when the last command was sent.
+// This can be used to correlate command sends with data receipts on the report topic.
+func (c *PrinterMQTTClient) GetLastCommandSent() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastCommandSent
 }
 
 // triggerUpdateCallbacks triggers the callback and sends to the update channel.
@@ -493,18 +501,24 @@ func (c *PrinterMQTTClient) publishCommand(payload map[string]interface{}) bool 
 		return false
 	}
 
-	// Record the timestamp before sending
-	c.mu.Lock()
-	c.LastCommandSent = time.Now()
-	c.mu.Unlock()
-
-	// Use QoS 0 (fire-and-forget) to avoid waiting for ACK
-	// The A1 Mini often doesn't send MQTT-level ACKs, but may still respond with data in the report topic
+	// Use QoS 0 (fire-and-forget) to avoid waiting for ACK.
+	// The A1 Mini often doesn't send MQTT-level ACKs, but may still respond with data in the report topic.
+	// NOTE: QoS 0 means commands may be silently lost on network failures.
 	token := c.client.Publish(c.commandTopic, 0, false, jsonData)
 
-	// Return immediately after handing the packet to the network buffer
-	// Don't wait for MQTT-level ACK - data responses come via the report topic
-	return token.Error() == nil
+	// Wait briefly to catch immediate network errors (not full ACK)
+	if !token.WaitTimeout(500 * time.Millisecond) {
+		if err := token.Error(); err != nil {
+			errorLog.Printf("Command publish error: %v", err)
+			return false
+		}
+	}
+
+	// Record timestamp after successful publish to correlate with data receipts
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastCommandSent = time.Now()
+	return true
 }
 
 // pushall forces a full state update from the printer.
