@@ -658,7 +658,7 @@ func cmdPrint(p *printer.Printer, args []string) error {
 
 // printUsage prints the main usage information.
 func printUsage() {
-	fmt.Print(`bambu-cli - Bambu Lab Printer CLI Tool
+	fmt.Print(`bambu-cli - Bambu Lab CLI tool
 
 Usage:
   bambu-cli [flags] <command> [arguments]

@@ -1,9 +1,9 @@
-# BambuSDK-Go Integration Guide
+# BambuSDK-Go Integration Guide (FEED THAT TO AI)
 
 > **Comprehensive API reference and cheat sheet for integrating Bambu Lab 3D printers into Go applications**
 
-**SDK Version:** v1.0.4
-**Go Version:** 1.21+
+**SDK Version:** v1.0.5
+**Go Version:** 1.26+
 **Last Updated:** 2026-04-09
 
 ---
@@ -1300,15 +1300,6 @@ func main() {
 | Camera frames | ~50-100KB JPEGs at 2fps |
 | FTP uploads | Blocking operation |
 | MQTT latency | <100ms on local network |
-
-### Best Practices
-
-1. **Use callbacks instead of polling** - State updates arrive via MQTT push
-2. **Use goroutines for FTP uploads** - FTP operations are blocking
-3. **Reuse printer instances** - Don't create new instances for each operation
-4. **Handle reconnection gracefully** - Network issues can happen
-5. **Use PrinterPool for multiple printers** - Manages connections efficiently
-6. **Use context for cancellable operations** - Especially for large file uploads
 
 ---
 
