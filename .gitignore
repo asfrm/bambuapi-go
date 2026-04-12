@@ -1,0 +1,12 @@
+main
+print
+bambu-cli-*
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+dist/
+
+.env
