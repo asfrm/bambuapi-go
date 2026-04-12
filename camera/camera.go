@@ -22,6 +22,17 @@ var (
 	infoLog  = log.New(os.Stdout, "[CAM INFO] ", log.Ldate|log.Ltime)
 )
 
+// CameraClient defines the interface for camera communication with the printer.
+type CameraClient interface {
+	Start() bool
+	Stop()
+	IsAlive() bool
+	GetFrame() (string, error)
+	GetFrameBytes() ([]byte, error)
+	WaitForFrame(timeout time.Duration) ([]byte, error)
+	WaitForFrameWithStart(timeout time.Duration) ([]byte, error)
+}
+
 // Maximum image size to prevent memory exhaustion (10MB)
 const maxImageSize = 10 * 1024 * 1024
 
@@ -45,10 +56,25 @@ type PrinterCamera struct {
 	lastFrame []byte
 	alive     bool
 	stopChan  chan struct{}
+
+	// TLS configuration
+	skipTLSVerify bool
+}
+
+// CameraOption is a function type for configuring camera client options.
+type CameraOption func(*PrinterCamera)
+
+// WithCameraInsecureSkipVerify sets whether to skip TLS certificate verification.
+// WARNING: Setting this to true makes the connection vulnerable to man-in-the-middle attacks.
+// Only use for testing or when you understand the security implications.
+func WithCameraInsecureSkipVerify(insecure bool) CameraOption {
+	return func(c *PrinterCamera) {
+		c.skipTLSVerify = insecure
+	}
 }
 
 // NewPrinterCamera creates a new camera client.
-func NewPrinterCamera(hostname, accessCode string, port int, username string) *PrinterCamera {
+func NewPrinterCamera(hostname, accessCode string, port int, username string, opts ...CameraOption) *PrinterCamera {
 	if port == 0 {
 		port = 6000
 	}
@@ -56,14 +82,22 @@ func NewPrinterCamera(hostname, accessCode string, port int, username string) *P
 		username = "bblp"
 	}
 
-	return &PrinterCamera{
-		username:   username,
-		accessCode: accessCode,
-		hostname:   hostname,
-		port:       port,
-		alive:      false,
-		stopChan:   make(chan struct{}),
+	c := &PrinterCamera{
+		username:      username,
+		accessCode:    accessCode,
+		hostname:      hostname,
+		port:          port,
+		alive:         false,
+		stopChan:      make(chan struct{}),
+		skipTLSVerify: true, // Default to insecure for backward compatibility
 	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
 }
 
 // Start starts the camera client.
@@ -222,13 +256,13 @@ func (c *PrinterCamera) retriever() {
 	const readChunkSize = 4096
 
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: c.skipTLSVerify,
 		MinVersion:         tls.VersionTLS12,
 	}
 
 	// Buffer pool for read chunks to reduce GC pressure
 	bufPool := sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return make([]byte, readChunkSize)
 		},
 	}
@@ -246,7 +280,7 @@ func (c *PrinterCamera) retriever() {
 		err = tlsConn.Handshake()
 		if err != nil {
 			errorLog.Printf("TLS handshake error: %v", err)
-			tlsConn.Close()
+			_ = tlsConn.Close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -256,7 +290,7 @@ func (c *PrinterCamera) retriever() {
 		_, err = tlsConn.Write(authData)
 		if err != nil {
 			errorLog.Printf("Error writing auth data: %v", err)
-			tlsConn.Close()
+			_ = tlsConn.Close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -265,13 +299,15 @@ func (c *PrinterCamera) retriever() {
 		var payloadSize int
 
 		// Set read deadline
-		tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if err := tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			debugLog.Printf("Failed to set read deadline: %v", err)
+		}
 
 		for c.alive {
 			// Check if we should stop
 			select {
 			case <-c.stopChan:
-				tlsConn.Close()
+				_ = tlsConn.Close()
 				return
 			default:
 			}
@@ -280,7 +316,7 @@ func (c *PrinterCamera) retriever() {
 			n, err := tlsConn.Read(buf)
 
 			if err != nil {
-				bufPool.Put(buf)
+				bufPool.Put(buf) //nolint:staticcheck // SA6002: performance trade-off is acceptable
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					time.Sleep(1 * time.Second)
 					continue
@@ -296,7 +332,8 @@ func (c *PrinterCamera) retriever() {
 
 			debugLog.Printf("Read chunk: %d bytes", n)
 
-			if img != nil && n > 0 {
+			switch {
+			case img != nil && n > 0:
 				debugLog.Println("Appending to image")
 				img = append(img, buf[:n]...)
 
@@ -304,7 +341,7 @@ func (c *PrinterCamera) retriever() {
 				if len(img) > maxImageSize {
 					errorLog.Printf("Image exceeds maximum size (%d > %d), resetting", len(img), maxImageSize)
 					img = nil
-					bufPool.Put(buf)
+					bufPool.Put(buf) //nolint:staticcheck // SA6002
 					continue
 				}
 
@@ -312,11 +349,12 @@ func (c *PrinterCamera) retriever() {
 					img = nil
 				} else if len(img) == payloadSize {
 					// Validate JPEG
-					if len(img) >= 4 && string(img[:4]) != string(jpegStart) {
+					switch {
+					case len(img) >= 4 && string(img[:4]) != string(jpegStart):
 						img = nil
-					} else if len(img) >= 2 && string(img[len(img)-2:]) != string(jpegEnd) {
+					case len(img) >= 2 && string(img[len(img)-2:]) != string(jpegEnd):
 						img = nil
-					} else {
+					default:
 						c.mu.Lock()
 						c.lastFrame = make([]byte, len(img))
 						copy(c.lastFrame, img)
@@ -324,28 +362,26 @@ func (c *PrinterCamera) retriever() {
 						img = nil
 					}
 				}
-			} else if n == 16 {
+			case n == 16:
 				debugLog.Println("Got header")
 				connectAttempts = 0
 				// Pre-allocate image buffer with expected capacity to reduce reallocations
 				img = make([]byte, 0, payloadSize)
 				// Payload size is in bytes 0-3 (little-endian, 3 bytes)
 				payloadSize = int(binary.LittleEndian.Uint32(append(buf[:3], 0)))
-			} else if n == 0 {
-				bufPool.Put(buf)
+			case n == 0:
+				bufPool.Put(buf) //nolint:staticcheck // SA6002
 				time.Sleep(5 * time.Second)
 				errorLog.Println("Wrong access code or IP")
-				break
-			} else {
-				bufPool.Put(buf)
+			default:
+				bufPool.Put(buf) //nolint:staticcheck // SA6002
 				errorLog.Println("Something bad happened")
 				time.Sleep(1 * time.Second)
-				break
 			}
-			bufPool.Put(buf)
+			bufPool.Put(buf) //nolint:staticcheck // SA6002
 		}
 
-		tlsConn.Close()
+		_ = tlsConn.Close()
 
 		if connectAttempts > 10 {
 			errorLog.Println("Too many connection attempts, reconnecting...")

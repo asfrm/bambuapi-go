@@ -18,19 +18,36 @@ import (
 )
 
 var (
-	// Debug logging is disabled by default. Set BAMBU_DEBUG=1 to enable.
-	debugLog *log.Logger
-	errorLog = log.New(os.Stderr, "[FTP ERROR] ", log.Ldate|log.Ltime|log.Lshortfile)
-	infoLog  = log.New(os.Stdout, "[FTP INFO] ", log.Ldate|log.Ltime)
+	infoLog = log.New(os.Stdout, "[FTP INFO] ", log.Ldate|log.Ltime)
 )
 
-func init() {
-	if os.Getenv("BAMBU_DEBUG") == "1" {
-		debugLog = log.New(os.Stdout, "[FTP DEBUG] ", log.Ldate|log.Ltime|log.Lmicroseconds|log.Lshortfile)
-	} else {
-		// Use io.Discard instead of deprecated ioutil.Discard
-		debugLog = log.New(io.Discard, "", 0)
-	}
+// FTPClient defines the interface for FTP communication with the printer.
+type FTPClient interface {
+	UploadFile(data io.Reader, filePath string) (string, error)
+	UploadFileWithContext(ctx context.Context, data io.Reader, filePath string) (string, error)
+	ListDirectory(path string) ([]string, error)
+	ListImagesDir() ([]string, error)
+	ListCacheDir() ([]string, error)
+	ListTimelapseDir() ([]string, error)
+	ListLoggerDir() ([]string, error)
+	DownloadFile(filePath string) ([]byte, error)
+	DownloadFileWithContext(ctx context.Context, filePath string) ([]byte, error)
+	DeleteFile(filePath string) error
+	GetLastImagePrint() ([]byte, error)
+	MakeDir(path string) error
+	ChangeDir(path string) error
+	GetCurrentDir() (string, error)
+	Rename(oldPath, newPath string) error
+	GetFileSize(filePath string) (uint64, error)
+	Close() error
+	IsConnected() bool
+	Reconnect() error
+	Noop() error
+	GetEntry(path string) (*ftp.Entry, error)
+	AppendFile(data io.Reader, filePath string) error
+	KeepAlive() error
+	ListRecursive(path string) ([]string, error)
+	FileExists(filePath string) (bool, error)
 }
 
 // sanitizePath removes path traversal attempts and ensures safe paths.
@@ -60,8 +77,20 @@ type PrinterFTPClient struct {
 	tlsConfig *tls.Config
 }
 
+// FTPOption is a function type for configuring FTP client options.
+type FTPOption func(*PrinterFTPClient)
+
+// WithFTPInsecureSkipVerify sets whether to skip TLS certificate verification.
+// WARNING: Setting this to true makes the connection vulnerable to man-in-the-middle attacks.
+// Only use for testing or when you understand the security implications.
+func WithFTPInsecureSkipVerify(insecure bool) FTPOption {
+	return func(c *PrinterFTPClient) {
+		c.tlsConfig.InsecureSkipVerify = insecure
+	}
+}
+
 // NewPrinterFTPClient creates a new FTP client.
-func NewPrinterFTPClient(serverIP, accessCode string, user string, port int) *PrinterFTPClient {
+func NewPrinterFTPClient(serverIP, accessCode string, user string, port int, opts ...FTPOption) *PrinterFTPClient {
 	if user == "" {
 		user = "bblp"
 	}
@@ -69,16 +98,23 @@ func NewPrinterFTPClient(serverIP, accessCode string, user string, port int) *Pr
 		port = 990
 	}
 
-	return &PrinterFTPClient{
+	c := &PrinterFTPClient{
 		serverIP:   serverIP,
 		port:       port,
 		user:       user,
 		accessCode: accessCode,
 		tlsConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: true, // Default to insecure for backward compatibility
 			MinVersion:         tls.VersionTLS12,
 		},
 	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
 }
 
 // connect connects to the FTP server with implicit TLS.
@@ -102,7 +138,7 @@ func (c *PrinterFTPClient) connect() error {
 
 	err = client.Login(c.user, c.accessCode)
 	if err != nil {
-		client.Quit()
+		_ = client.Quit()
 		return fmt.Errorf("failed to login to FTP server: %w", err)
 	}
 
@@ -261,7 +297,7 @@ func (c *PrinterFTPClient) DownloadFileWithContext(ctx context.Context, filePath
 		if err != nil {
 			return fmt.Errorf("failed to retrieve file: %w", err)
 		}
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 
 		// Use context-aware copy
 		_, err = io.Copy(&fileData, reader)
@@ -372,6 +408,9 @@ func (c *PrinterFTPClient) GetFileSize(filePath string) (uint64, error) {
 		if err != nil {
 			return err
 		}
+		if fileSize < 0 {
+			return fmt.Errorf("invalid file size: %d", fileSize)
+		}
 		size = uint64(fileSize)
 		return nil
 	})
@@ -397,7 +436,7 @@ func (c *PrinterFTPClient) IsConnected() bool {
 
 // Reconnect reconnects to the FTP server.
 func (c *PrinterFTPClient) Reconnect() error {
-	c.close()
+	_ = c.close()
 	return c.connect()
 }
 
@@ -458,8 +497,8 @@ func (c *PrinterFTPClient) AppendFile(data io.Reader, filePath string) error {
 		}
 
 		// Append new data
-		combinedData := append(currentData, fileData...)
-		return client.Stor(safePath, bytes.NewReader(combinedData))
+		currentData = append(currentData, fileData...)
+		return client.Stor(safePath, bytes.NewReader(currentData))
 	})
 
 	return err
