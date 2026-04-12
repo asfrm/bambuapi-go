@@ -66,11 +66,9 @@ type MQTTClient interface {
 	SetAuxFanSpeed(speed any) (bool, error)
 	SetChamberFanSpeed(speed any) (bool, error)
 	AutoHome() bool
-	SetBedHeight(height int) bool
 	SetPartFanSpeedInt(speed int) bool
 	SetAuxFanSpeedInt(speed int) bool
 	SetChamberFanSpeedInt(speed int) bool
-	SetAutoStepRecovery(autoStepRecovery bool) bool
 	StartPrint3MF(filename string, plateNumber any, useAMS bool, amsMapping []int, skipObjects []int, flowCalibration bool, bedType string) bool
 	StopPrint() bool
 	PausePrint() bool
@@ -82,10 +80,7 @@ type MQTTClient interface {
 	UnloadFilamentSpool() bool
 	ResumeFilamentAction() bool
 	Calibration(bedLeveling, motorNoiseCancellation, vibrationCompensation bool) bool
-	SetOnboardPrinterTimelapse(enable bool) bool
 	SetNozzleInfo(nozzleType printerinfo.NozzleType, nozzleDiameter float64) bool
-	NewPrinterFirmware() string
-	UpgradeFirmware(override bool) bool
 	ProcessAMS()
 	AMSHub() *ams.AMSHub
 	VTTray() filament.FilamentTray
@@ -95,10 +90,6 @@ type MQTTClient interface {
 	PrintType() string
 	WifiSignal() string
 	Reboot() bool
-	GetAccessCode() string
-	RequestAccessCode() bool
-	GetFirmwareHistory() []map[string]any
-	DowngradeFirmware(firmwareVersion string) bool
 }
 
 var (
@@ -129,7 +120,7 @@ type PrinterMQTTClient struct {
 
 	amsHub      *ams.AMSHub
 	strict      bool
-	printerInfo printerinfo.PrinterFirmwareInfo
+	printerType printerinfo.PrinterType
 
 	connected bool
 	ready     bool
@@ -203,13 +194,10 @@ func NewPrinterMQTTClientWithOptions(hostname, access, printerSerial string, use
 		pushallAggressive: pushallOnConnect,
 		amsHub:            ams.NewAMSHub(),
 		strict:            strict,
-		printerInfo: printerinfo.PrinterFirmwareInfo{
-			PrinterType:     printerinfo.PrinterTypeP1S,
-			FirmwareVersion: "01.04.00.00",
-		},
-		updateChannel:  make(chan struct{}, 10), // Buffered channel to avoid blocking
-		commandTimeout: 5 * time.Second,         // Default timeout
-		skipTLSVerify:  true,                    // Default to insecure for backward compatibility
+		printerType:       printerinfo.PrinterTypeUnknown,
+		updateChannel:     make(chan struct{}, 10),
+		commandTimeout:    5 * time.Second,
+		skipTLSVerify:     true,
 	}
 
 	// Apply options
@@ -365,8 +353,6 @@ func (c *PrinterMQTTClient) onConnect(client mqtt.Client) {
 
 	if c.pushallAggressive {
 		c.pushall()
-		c.infoGetVersion()
-		c.requestFirmwareHistory()
 	}
 
 	infoLog.Println("Connection handshake completed")
@@ -410,14 +396,6 @@ func (c *PrinterMQTTClient) manualUpdate(doc map[string]any) {
 	c.ready = true
 	c.mu.Unlock()
 
-	// Update firmware version AFTER releasing lock to avoid deadlock
-	// (getFirmwareVersion acquires read lock)
-	if firmwareVersion := c.getFirmwareVersion(); firmwareVersion != "" {
-		c.mu.Lock()
-		c.printerInfo.FirmwareVersion = firmwareVersion
-		c.mu.Unlock()
-	}
-
 	// Trigger state update callbacks
 	c.triggerUpdateCallbacks()
 }
@@ -429,19 +407,6 @@ func (c *PrinterMQTTClient) getPrintValue(key string, defaultValue any) any {
 
 	if printData, ok := c.data["print"].(map[string]any); ok {
 		if val, ok := printData[key]; ok {
-			return val
-		}
-	}
-	return defaultValue
-}
-
-// getInfoValue gets a value from the "info" section.
-func (c *PrinterMQTTClient) getInfoValue(key string, defaultValue any) any {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if infoData, ok := c.data["info"].(map[string]any); ok {
-		if val, ok := infoData[key]; ok {
 			return val
 		}
 	}
@@ -589,43 +554,6 @@ func (c *PrinterMQTTClient) pushall() bool {
 // RequestFullState requests a full state update from the printer.
 func (c *PrinterMQTTClient) RequestFullState() bool {
 	return c.pushall()
-}
-
-// infoGetVersion requests hardware and firmware info.
-func (c *PrinterMQTTClient) infoGetVersion() bool {
-	return c.publishCommand(map[string]any{
-		"info": map[string]any{
-			"command": "get_version",
-		},
-	})
-}
-
-// requestFirmwareHistory requests firmware history.
-func (c *PrinterMQTTClient) requestFirmwareHistory() bool {
-	return c.publishCommand(map[string]any{
-		"upgrade": map[string]any{
-			"command": "get_history",
-		},
-	})
-}
-
-// getFirmwareVersion gets the current firmware version.
-func (c *PrinterMQTTClient) getFirmwareVersion() string {
-	modules, ok := c.getInfoValue("module", []any{}).([]any)
-	if !ok {
-		return ""
-	}
-
-	for _, m := range modules {
-		if module, ok := m.(map[string]any); ok {
-			if name, ok := module["name"].(string); ok && name == "ota" {
-				if swVer, ok := module["sw_ver"].(string); ok {
-					return swVer
-				}
-			}
-		}
-	}
-	return ""
 }
 
 // GetLastPrintPercentage gets the print completion percentage.
@@ -784,60 +712,6 @@ func (c *PrinterMQTTClient) Dump() map[string]any {
 	return result
 }
 
-// setTemperatureSupport checks if the printer supports direct temperature commands.
-func (c *PrinterMQTTClient) setTemperatureSupport() bool {
-	printerType := c.printerInfo.PrinterType
-	firmwareVersion := c.printerInfo.FirmwareVersion
-
-	switch printerType {
-	case printerinfo.PrinterTypeP1P, printerinfo.PrinterTypeP1S,
-		printerinfo.PrinterTypeX1E, printerinfo.PrinterTypeX1C:
-		return compareVersions(firmwareVersion, "01.06") < 0
-	case printerinfo.PrinterTypeA1, printerinfo.PrinterTypeA1Mini:
-		return compareVersions(firmwareVersion, "01.04") <= 0
-	default:
-		return false
-	}
-}
-
-// compareVersions compares two version strings.
-// Returns -1, 0, or 1 if v1 < v2, v1 == v2, or v1 > v2 respectively.
-// If a version part cannot be parsed as an integer, it is treated as 0.
-func compareVersions(v1, v2 string) int {
-	parts1 := strings.Split(strings.ReplaceAll(v1, " ", ""), ".")
-	parts2 := strings.Split(strings.ReplaceAll(v2, " ", ""), ".")
-
-	maxLen := max(len(parts2), len(parts1))
-
-	for i := range maxLen {
-		n1 := 0
-		n2 := 0
-
-		if i < len(parts1) {
-			var err error
-			n1, err = strconv.Atoi(parts1[i])
-			if err != nil {
-				warnLog.Printf("compareVersions: cannot parse version part %q in %q, treating as 0", parts1[i], v1)
-			}
-		}
-		if i < len(parts2) {
-			var err error
-			n2, err = strconv.Atoi(parts2[i])
-			if err != nil {
-				warnLog.Printf("compareVersions: cannot parse version part %q in %q, treating as 0", parts2[i], v2)
-			}
-		}
-
-		if n1 > n2 {
-			return 1
-		} else if n1 < n2 {
-			return -1
-		}
-	}
-
-	return 0
-}
-
 // isValidGcode checks if a line is a valid G-code command.
 func isValidGcode(line string) bool {
 	// Remove comments
@@ -906,10 +780,6 @@ func (c *PrinterMQTTClient) SendGcode(gcodeCommand any, gcodeCheck bool) (bool, 
 
 // SetBedTemperature sets the bed temperature.
 func (c *PrinterMQTTClient) SetBedTemperature(temperature int, override bool) bool {
-	if c.setTemperatureSupport() {
-		return c.sendGcodeLine(fmt.Sprintf("M140 S%d", temperature))
-	}
-
 	if temperature < 40 && !override {
 		warnLog.Printf("Attempting to set low bed temperature (%d). Use override=true to force.", temperature)
 		return false
@@ -919,10 +789,6 @@ func (c *PrinterMQTTClient) SetBedTemperature(temperature int, override bool) bo
 
 // SetNozzleTemperature sets the nozzle temperature.
 func (c *PrinterMQTTClient) SetNozzleTemperature(temperature int, override bool) bool {
-	if c.setTemperatureSupport() {
-		return c.sendGcodeLine(fmt.Sprintf("M104 S%d", temperature))
-	}
-
 	if temperature < 60 && !override {
 		warnLog.Printf("Attempting to set low nozzle temperature (%d). Use override=true to force.", temperature)
 		return false
@@ -987,11 +853,6 @@ func (c *PrinterMQTTClient) AutoHome() bool {
 	return c.sendGcodeLine("G28")
 }
 
-// SetBedHeight sets the Z-axis height.
-func (c *PrinterMQTTClient) SetBedHeight(height int) bool {
-	return c.sendGcodeLine(fmt.Sprintf("G90\nG0 Z%d", height))
-}
-
 // SetPartFanSpeedInt sets the part fan speed (0-255).
 func (c *PrinterMQTTClient) SetPartFanSpeedInt(speed int) bool {
 	_, err := c.SetPartFanSpeed(speed)
@@ -1020,16 +881,6 @@ func (c *PrinterMQTTClient) SetChamberFanSpeedInt(speed int) bool {
 		return false
 	}
 	return true
-}
-
-// SetAutoStepRecovery sets auto step recovery.
-func (c *PrinterMQTTClient) SetAutoStepRecovery(autoStepRecovery bool) bool {
-	return c.publishCommand(map[string]any{
-		"print": map[string]any{
-			"command":       "gcode_line",
-			"auto_recovery": autoStepRecovery,
-		},
-	})
 }
 
 // StartPrint3MF starts printing a 3MF file using the exact Bambu Lab "project_file" command.
@@ -1241,21 +1092,6 @@ func (c *PrinterMQTTClient) Calibration(bedLeveling, motorNoiseCancellation, vib
 	})
 }
 
-// SetOnboardPrinterTimelapse enables/disables onboard timelapse.
-func (c *PrinterMQTTClient) SetOnboardPrinterTimelapse(enable bool) bool {
-	control := "enable"
-	if !enable {
-		control = "disable"
-	}
-
-	return c.publishCommand(map[string]any{
-		"camera": map[string]any{
-			"command": "ipcam_record_set",
-			"control": control,
-		},
-	})
-}
-
 // SetNozzleInfo sets the nozzle information.
 func (c *PrinterMQTTClient) SetNozzleInfo(nozzleType printerinfo.NozzleType, nozzleDiameter float64) bool {
 	return c.publishCommand(map[string]any{
@@ -1264,50 +1100,6 @@ func (c *PrinterMQTTClient) SetNozzleInfo(nozzleType printerinfo.NozzleType, noz
 			"command":         "set_accessories",
 			"nozzle_diameter": nozzleDiameter,
 			"nozzle_type":     nozzleType.String(),
-		},
-	})
-}
-
-// NewPrinterFirmware checks if new firmware is available.
-func (c *PrinterMQTTClient) NewPrinterFirmware() string {
-	upgradeState, ok := c.getPrintValue("upgrade_state", nil).(map[string]any)
-	if !ok {
-		return ""
-	}
-
-	newVerList, ok := upgradeState["new_ver_list"].([]any)
-	if !ok {
-		return ""
-	}
-
-	for _, item := range newVerList {
-		if i, ok := item.(map[string]any); ok {
-			if name, ok := i["name"].(string); ok && name == "ota" {
-				if ver, ok := i["new_ver"].(string); ok {
-					return ver
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// UpgradeFirmware upgrades to the latest firmware.
-func (c *PrinterMQTTClient) UpgradeFirmware(override bool) bool {
-	newFirmware := c.NewPrinterFirmware()
-	if newFirmware == "" {
-		return false
-	}
-
-	if compareVersions(newFirmware, "1.08") >= 0 && !override {
-		warnLog.Printf("Firmware %s may cause API incompatibility. Use override=true to force.", newFirmware)
-		return false
-	}
-
-	return c.publishCommand(map[string]any{
-		"upgrade": map[string]any{
-			"command": "upgrade_confirm",
-			"src_id":  2,
 		},
 	})
 }
@@ -1457,86 +1249,6 @@ func (c *PrinterMQTTClient) Reboot() bool {
 	return c.publishCommand(map[string]any{
 		"system": map[string]any{
 			"command": "reboot",
-		},
-	})
-}
-
-// GetAccessCode gets the access code.
-func (c *PrinterMQTTClient) GetAccessCode() string {
-	systemData := c.getInfoValue("system", nil)
-	if systemData == nil {
-		return c.access
-	}
-
-	if sysMap, ok := systemData.(map[string]any); ok {
-		if code, ok := sysMap["command"].(string); ok {
-			if code != c.access {
-				errorLog.Printf("Unexpected access code: expected %s, got %s", c.access, code)
-			}
-			return code
-		}
-	}
-	return c.access
-}
-
-// RequestAccessCode requests the access code from the printer.
-func (c *PrinterMQTTClient) RequestAccessCode() bool {
-	return c.publishCommand(map[string]any{
-		"system": map[string]any{
-			"command": "get_access_code",
-		},
-	})
-}
-
-// GetFirmwareHistory gets the firmware history.
-func (c *PrinterMQTTClient) GetFirmwareHistory() []map[string]any {
-	upgradeData := c.getInfoValue("upgrade", nil)
-	if upgradeData == nil {
-		return []map[string]any{}
-	}
-
-	if upgradeMap, ok := upgradeData.(map[string]any); ok {
-		if history, ok := upgradeMap["firmware_optional"].([]any); ok {
-			result := make([]map[string]any, len(history))
-			for i, h := range history {
-				if hm, ok := h.(map[string]any); ok {
-					result[i] = hm
-				}
-			}
-			return result
-		}
-	}
-	return []map[string]any{}
-}
-
-// DowngradeFirmware downgrades to a specific firmware version.
-func (c *PrinterMQTTClient) DowngradeFirmware(firmwareVersion string) bool {
-	firmwareHistory := c.GetFirmwareHistory()
-	if len(firmwareHistory) == 0 {
-		warnLog.Println("Firmware history not up to date")
-		return false
-	}
-
-	var targetFirmware map[string]any
-	for _, firmware := range firmwareHistory {
-		if fwData, ok := firmware["firmware"].(map[string]any); ok {
-			if version, ok := fwData["version"].(string); ok && version == firmwareVersion {
-				targetFirmware = firmware
-				break
-			}
-		}
-	}
-
-	if targetFirmware == nil {
-		warnLog.Printf("Firmware %s not found in listed firmware", firmwareVersion)
-		return false
-	}
-
-	return c.publishCommand(map[string]any{
-		"upgrade": map[string]any{
-			"command":           "upgrade_history",
-			"src_id":            2,
-			"firmware_optional": targetFirmware,
 		},
 	})
 }

@@ -62,12 +62,6 @@ func ParsePrinterType(s string) PrinterType {
 	}
 }
 
-// PrinterFirmwareInfo holds printer firmware information.
-type PrinterFirmwareInfo struct {
-	PrinterType     PrinterType
-	FirmwareVersion string
-}
-
 // NozzleDiameters contains valid nozzle diameters.
 var NozzleDiameters = map[float64]bool{
 	0.2: true,

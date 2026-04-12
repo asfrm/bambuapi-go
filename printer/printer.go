@@ -608,11 +608,6 @@ func (p *Printer) HomePrinter() error {
 	return boolToError(p.MQTTClient.AutoHome())
 }
 
-// MoveZAxis moves the Z-axis to a specific height.
-func (p *Printer) MoveZAxis(height int) error {
-	return boolToError(p.MQTTClient.SetBedHeight(height))
-}
-
 // SetFilamentPrinter sets the printer filament settings.
 func (p *Printer) SetFilamentPrinter(color string, f any, amsID, trayID int) error {
 	var settings filament.AMSFilamentSettings
@@ -771,11 +766,6 @@ func (p *Printer) SetChamberFanSpeedInt(speed int) error {
 	return boolToError(p.MQTTClient.SetChamberFanSpeedInt(speed))
 }
 
-// SetAutoStepRecovery sets auto step recovery.
-func (p *Printer) SetAutoStepRecovery(autoStepRecovery bool) error {
-	return boolToError(p.MQTTClient.SetAutoStepRecovery(autoStepRecovery))
-}
-
 // VTTray gets the external spool filament tray.
 func (p *Printer) VTTray() filament.FilamentTray {
 	return p.MQTTClient.VTTray()
@@ -817,44 +807,9 @@ func (p *Printer) Reboot() error {
 	return boolToError(p.MQTTClient.Reboot())
 }
 
-// SetOnboardPrinterTimelapse enables/disables onboard timelapse.
-func (p *Printer) SetOnboardPrinterTimelapse(enable bool) error {
-	return boolToError(p.MQTTClient.SetOnboardPrinterTimelapse(enable))
-}
-
 // SetNozzleInfo sets the nozzle information.
 func (p *Printer) SetNozzleInfo(nozzleType printerinfo.NozzleType, nozzleDiameter float64) error {
 	return boolToError(p.MQTTClient.SetNozzleInfo(nozzleType, nozzleDiameter))
-}
-
-// NewPrinterFirmware checks if new firmware is available.
-func (p *Printer) NewPrinterFirmware() string {
-	return p.MQTTClient.NewPrinterFirmware()
-}
-
-// UpgradeFirmware upgrades to the latest firmware.
-func (p *Printer) UpgradeFirmware(override bool) error {
-	return boolToError(p.MQTTClient.UpgradeFirmware(override))
-}
-
-// DowngradeFirmware downgrades to a specific firmware version.
-func (p *Printer) DowngradeFirmware(firmwareVersion string) error {
-	return boolToError(p.MQTTClient.DowngradeFirmware(firmwareVersion))
-}
-
-// GetAccessCode gets the access code.
-func (p *Printer) GetAccessCode() string {
-	return p.MQTTClient.GetAccessCode()
-}
-
-// RequestAccessCode requests the access code from the printer.
-func (p *Printer) RequestAccessCode() bool {
-	return p.MQTTClient.RequestAccessCode()
-}
-
-// GetFirmwareHistory gets the firmware history.
-func (p *Printer) GetFirmwareHistory() []map[string]any {
-	return p.MQTTClient.GetFirmwareHistory()
 }
 
 // GetPartFanSpeed gets the part fan speed.

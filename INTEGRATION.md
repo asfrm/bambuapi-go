@@ -736,10 +736,6 @@ p.CalibratePrinter(
 
 ```go
 p.Reboot()  // Reboot printer
-
-// Firmware
-newFw := p.NewPrinterFirmware()  // Check for updates
-p.UpgradeFirmware(false)         // Upgrade (false = safety check)
 ```
 
 ---
@@ -818,7 +814,6 @@ nozzleDiameter := p.NozzleDiameter() // mm (e.g., 0.4)
 // Network
 wifiSignal := p.WifiSignal()  // dBm (e.g., "-45")
 
-// Firmware
 info := p.MQTTDump()  // Full raw data dump
 ```
 
@@ -1342,8 +1337,8 @@ go install github.com/asfrm/bambusdk-go/cmd/bambu-cli@latest
 | `calibrate` | Run calibration (--bed, --motor, --vibration) |
 | `filament` | Filament control (load/unload/retry) |
 | `ams` | Get AMS status and filament info |
-| `info` | Get printer info (firmware, nozzle, etc.) |
-| `firmware` | Check/upgrade firmware |
+| `info` | Get printer info (nozzle, serial, etc.) |
+| `firmware` | Show firmware info (deprecated) |
 | `reboot` | Reboot printer |
 | `camera` | Capture camera frames (-o output, -n count, -i interval) |
 | `print` | Upload and start print (3MF/G-code) |

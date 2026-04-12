@@ -479,58 +479,23 @@ func cmdReboot(p *printer.Printer, args []string) error {
 	return nil
 }
 
-// cmdFirmware handles the firmware command.
+// cmdFirmware is deprecated and has been removed.
+// Firmware update/downgrade is not supported on Bambu printers.
 func cmdFirmware(p *printer.Printer, args []string) error {
-	if len(args) < 1 {
-		// Check for updates
-		newFw := p.NewPrinterFirmware()
-		if newFw != "" {
-			fmt.Printf("New firmware available: %s\n", newFw)
-		} else {
-			fmt.Println("Firmware is up to date")
-		}
-		return nil
-	}
-
-	switch strings.ToLower(args[0]) {
-	case "upgrade":
-		if err := p.UpgradeFirmware(false); err != nil {
-			return fmt.Errorf("failed to start firmware upgrade: %w", err)
-		}
-		fmt.Println("Starting firmware upgrade...")
-		return nil
-	default:
-		return fmt.Errorf("unknown firmware action: %s (use upgrade)", args[0])
-	}
+	fmt.Println("Firmware management is not supported via this SDK.")
+	fmt.Println("Use Bambu Studio or Bambu Handy for firmware updates.")
+	return nil
 }
 
 // cmdInfo handles the info command.
 func cmdInfo(p *printer.Printer, args []string) error {
-	dump := p.MQTTDump()
-
 	fmt.Println("=== Printer Information ===")
 	fmt.Println()
-
-	if info, ok := dump["info"].(map[string]any); ok {
-		if modules, ok := info["module"].([]any); ok {
-			fmt.Println("--- Firmware Modules ---")
-			for _, m := range modules {
-				if module, ok := m.(map[string]any); ok {
-					if name, ok := module["name"].(string); ok {
-						if ver, ok := module["sw_ver"].(string); ok {
-							fmt.Printf("  %-15s %s\n", name, ver)
-						}
-					}
-				}
-			}
-			fmt.Println()
-		}
-	}
-
 	fmt.Printf("Nozzle Type:     %s\n", p.NozzleType())
 	fmt.Printf("Nozzle Diameter: %.1f mm\n", p.NozzleDiameter())
 	fmt.Printf("Serial:          %s\n", p.Serial)
 	fmt.Printf("IP Address:      %s\n", p.IPAddress)
+	fmt.Printf("AMS Units:       %d\n", len(p.AMSHub().AMSHub))
 
 	return nil
 }
@@ -718,7 +683,7 @@ Commands:
   filament <action>   Filament control (load|unload|retry)
   ams                 Show AMS status
   info                Show printer information
-  firmware            Check/upgrade firmware
+  firmware            Show firmware info (deprecated)
   reboot              Reboot the printer
   camera              Capture camera frame(s) (-o output, -n count, -i interval)
   print <file>        Upload and print a 3MF/Gcode file (--plate, --ams, --bed)
