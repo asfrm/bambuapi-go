@@ -391,8 +391,7 @@ Detailed status including:
 
 ### Camera Not Working
 
-- X1 series: Camera support may be limited
-- Ensure camera is enabled in printer settings
+- X1 series: Camera support may be limited - not tested yet.
 - Check access code permissions
 - **Memory Limit**: Images larger than 10MB are rejected to prevent OOM
 
